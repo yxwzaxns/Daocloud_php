@@ -43,6 +43,7 @@ RUN chmod 755 ./start.sh
 EXPOSE 80
 CMD ["./start.sh"]
 
+RUN ln -s /var/www/html /var/vo
 #COPY src/ /var/www/html
 #WORKDIR /var/www/html
 

@@ -1,292 +1,240 @@
 <?php
-/**
- * CodeIgniter
- *
- * An open source application development framework for PHP
- *
- * This content is released under the MIT License (MIT)
- *
- * Copyright (c) 2014 - 2015, British Columbia Institute of Technology
- *
- * Permission is hereby granted, free of charge, to any person obtaining a copy
- * of this software and associated documentation files (the "Software"), to deal
- * in the Software without restriction, including without limitation the rights
- * to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
- * copies of the Software, and to permit persons to whom the Software is
- * furnished to do so, subject to the following conditions:
- *
- * The above copyright notice and this permission notice shall be included in
- * all copies or substantial portions of the Software.
- *
- * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
- * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
- * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
- * AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
- * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
- * OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
- * THE SOFTWARE.
- *
- * @package	CodeIgniter
- * @author	EllisLab Dev Team
- * @copyright	Copyright (c) 2008 - 2014, EllisLab, Inc. (http://ellislab.com/)
- * @copyright	Copyright (c) 2014 - 2015, British Columbia Institute of Technology (http://bcit.ca/)
- * @license	http://opensource.org/licenses/MIT	MIT License
- * @link	http://codeigniter.com
- * @since	Version 1.0.0
- * @filesource
- */
 
-/*
- *---------------------------------------------------------------
- * APPLICATION ENVIRONMENT
- *---------------------------------------------------------------
- *
- * You can load different configurations depending on your
- * current environment. Setting the environment also influences
- * things like logging and error reporting.
- *
- * This can be set to anything, but default usage is:
- *
- *     development
- *     testing
- *     production
- *
- * NOTE: If you change these, also change the error_reporting() code below
- */
-	define('ENVIRONMENT', isset($_SERVER['CI_ENV']) ? $_SERVER['CI_ENV'] : 'development');
+require_once 'includes/common.inc.php';
 
-/*
- *---------------------------------------------------------------
- * ERROR REPORTING
- *---------------------------------------------------------------
- *
- * Different environments will require different levels of error reporting.
- * By default development will show errors but testing and live will hide them.
- */
-switch (ENVIRONMENT)
-{
-	case 'development':
-		error_reporting(-1);
-		ini_set('display_errors', 1);
-	break;
+if($redis) {
 
-	case 'testing':
-	case 'production':
-		ini_set('display_errors', 0);
-		if (version_compare(PHP_VERSION, '5.3', '>='))
-		{
-			error_reporting(E_ALL & ~E_NOTICE & ~E_DEPRECATED & ~E_STRICT & ~E_USER_NOTICE & ~E_USER_DEPRECATED);
-		}
-		else
-		{
-			error_reporting(E_ALL & ~E_NOTICE & ~E_STRICT & ~E_USER_NOTICE);
-		}
-	break;
+    if (!empty($server['keys'])) {
+        $keys = $redis->keys($server['filter']);
+    } else {
+        $next = 0;
+        $keys = array();
 
-	default:
-		header('HTTP/1.1 503 Service Unavailable.', TRUE, 503);
-		echo 'The application environment is not set correctly.';
-		exit(1); // EXIT_ERROR
+        while (true) {
+            $r = $redis->scan($next, 'MATCH', $server['filter'], 'COUNT', $server['scansize']);
+
+            $next = $r[0];
+            $keys = array_merge($keys, $r[1]);
+
+            if ($next == 0) {
+                break;
+            }
+        }
+    }
+
+    sort($keys);
+
+    $namespaces = array(); // Array to hold our top namespaces.
+
+    // Build an array of nested arrays containing all our namespaces and containing keys.
+    foreach ($keys as $key) {
+      // Ignore keys that are to long (Redis supports keys that can be way to long to put in an url).
+      if (strlen($key) > $config['maxkeylen']) {
+        continue;
+      }
+
+      $key = explode($server['seperator'], $key);
+
+      // $d will be a reference to the current namespace.
+      $d = &$namespaces;
+
+      // We loop though all the namespaces for this key creating the array for each.
+      // Each time updating $d to be a reference to the last namespace so we can create the next one in it.
+      for ($i = 0; $i < (count($key) - 1); ++$i) {
+        if (!isset($d[$key[$i]])) {
+          $d[$key[$i]] = array();
+        }
+
+        $d = &$d[$key[$i]];
+      }
+
+      // Nodes containing an item named __phpredisadmin__ are also a key, not just a directory.
+      // This means that creating an actual key named __phpredisadmin__ will make this bug.
+      $d[$key[count($key) - 1]] = array('__phpredisadmin__' => true);
+
+      // Unset $d so we don't accidentally overwrite it somewhere else.
+      unset($d);
+    }
+
+    // Recursive function used to print the namespaces.
+    function print_namespace($item, $name, $fullkey, $islast) {
+      global $config, $server, $redis;
+
+      // Is this also a key and not just a namespace?
+      if (isset($item['__phpredisadmin__'])) {
+        // Unset it so we won't loop over it when printing this namespace.
+        unset($item['__phpredisadmin__']);
+
+        $class = array();
+        $len   = false;
+
+        if (isset($_GET['key']) && ($fullkey == $_GET['key'])) {
+          $class[] = 'current';
+        }
+        if ($islast) {
+          $class[] = 'last';
+        }
+
+        // Get the number of items in the key.
+        if (!isset($config['faster']) || !$config['faster']) {
+          switch ($redis->type($fullkey)) {
+            case 'hash':
+              $len = $redis->hLen($fullkey);
+              break;
+
+            case 'list':
+              $len = $redis->lLen($fullkey);
+              break;
+
+            case 'set':
+              $len = $redis->sCard($fullkey);
+              break;
+
+            case 'zset':
+              $len = $redis->zCard($fullkey);
+              break;
+          }
+        }
+
+
+        ?>
+        <li<?php echo empty($class) ? '' : ' class="'.implode(' ', $class).'"'?>>
+        <a href="?view&amp;s=<?php echo $server['id']?>&amp;d=<?php echo $server['db']?>&amp;key=<?php echo urlencode($fullkey)?>"><?php echo format_html($name)?><?php if ($len !== false) { ?><span class="info">(<?php echo $len?>)</span><?php } ?></a>
+        </li>
+        <?php
+      }
+
+      // Does this namespace also contain subkeys?
+      if (count($item) > 0) {
+        ?>
+        <li class="folder<?php echo ($fullkey === '') ? '' : ' collapsed'?><?php echo $islast ? ' last' : ''?>">
+        <div class="icon"><?php echo format_html($name)?>&nbsp;<span class="info">(<?php echo count($item)?>)</span>
+        <?php if ($fullkey !== '') { ?><a href="delete.php?s=<?php echo $server['id']?>&amp;d=<?php echo $server['db']?>&amp;tree=<?php echo urlencode($fullkey)?>:" class="deltree"><img src="images/delete.png" width="10" height="10" title="Delete tree" alt="[X]"></a><?php } ?>
+        </div><ul>
+        <?php
+
+        $l = count($item);
+
+        foreach ($item as $childname => $childitem) {
+          // $fullkey will be empty on the first call.
+          if ($fullkey === '') {
+            $childfullkey = $childname;
+          } else {
+            $childfullkey = $fullkey.$server['seperator'].$childname;
+          }
+
+          print_namespace($childitem, $childname, $childfullkey, (--$l == 0));
+        }
+
+        ?>
+        </ul>
+        </li>
+        <?php
+      }
+    }
+
+}  // if redis
+
+
+// This is basically the same as the click code in index.js.
+// Just build the url for the frame based on our own url.
+if (count($_GET) == 0) {
+  $iframe = 'overview.php';
+} else {
+  $iframe = substr($_SERVER['REQUEST_URI'], strpos($_SERVER['REQUEST_URI'], '?') + 1);
+
+  if (strpos($iframe, '&') !== false) {
+    $iframe = substr_replace($iframe, '.php?', strpos($iframe, '&'), 1);
+  } else {
+    $iframe .= '.php';
+  }
 }
 
-/*
- *---------------------------------------------------------------
- * SYSTEM FOLDER NAME
- *---------------------------------------------------------------
- *
- * This variable must contain the name of your "system" folder.
- * Include the path if the folder is not in the same directory
- * as this file.
- */
-	$system_path = 'system';
-
-/*
- *---------------------------------------------------------------
- * APPLICATION FOLDER NAME
- *---------------------------------------------------------------
- *
- * If you want this front controller to use a different "application"
- * folder than the default one you can set its name here. The folder
- * can also be renamed or relocated anywhere on your server. If
- * you do, use a full server path. For more info please see the user guide:
- * http://codeigniter.com/user_guide/general/managing_apps.html
- *
- * NO TRAILING SLASH!
- */
-	$application_folder = 'application';
-
-/*
- *---------------------------------------------------------------
- * VIEW FOLDER NAME
- *---------------------------------------------------------------
- *
- * If you want to move the view folder out of the application
- * folder set the path to the folder here. The folder can be renamed
- * and relocated anywhere on your server. If blank, it will default
- * to the standard location inside your application folder. If you
- * do move this, use the full server path to this folder.
- *
- * NO TRAILING SLASH!
- */
-	$view_folder = '';
 
 
-/*
- * --------------------------------------------------------------------
- * DEFAULT CONTROLLER
- * --------------------------------------------------------------------
- *
- * Normally you will set your default controller in the routes.php file.
- * You can, however, force a custom routing by hard-coding a
- * specific controller class/function here. For most applications, you
- * WILL NOT set your routing here, but it's an option for those
- * special instances where you might want to override the standard
- * routing in a specific front controller that shares a common CI installation.
- *
- * IMPORTANT: If you set the routing here, NO OTHER controller will be
- * callable. In essence, this preference limits your application to ONE
- * specific controller. Leave the function name blank if you need
- * to call functions dynamically via the URI.
- *
- * Un-comment the $routing array below to use this feature
- */
-	// The directory name, relative to the "controllers" folder.  Leave blank
-	// if your controller is not in a sub-folder within the "controllers" folder
-	// $routing['directory'] = '';
+$page['css'][] = 'index';
+$page['js'][]  = 'index';
+$page['js'][]  = 'jquery-cookie';
 
-	// The controller class file name.  Example:  mycontroller
-	// $routing['controller'] = '';
+require 'includes/header.inc.php';
 
-	// The controller function you wish to be called.
-	// $routing['function']	= '';
+?>
+<div id="sidebar">
 
+<h1 class="logo"><a href="?overview&amp;s=<?php echo $server['id']?>&amp;d=<?php echo $server['db']?>">phpRedisAdmin</a></h1>
 
-/*
- * -------------------------------------------------------------------
- *  CUSTOM CONFIG VALUES
- * -------------------------------------------------------------------
- *
- * The $assign_to_config array below will be passed dynamically to the
- * config class when initialized. This allows you to set custom config
- * items or override any default config values found in the config.php file.
- * This can be handy as it permits you to share one application between
- * multiple front controller files, with each file containing different
- * config values.
- *
- * Un-comment the $assign_to_config array below to use this feature
- */
-	// $assign_to_config['name_of_config_item'] = 'value of config item';
+<p>
+<select id="server">
+<?php foreach ($config['servers'] as $i => $srv) { ?>
+<option value="<?php echo $i?>" <?php echo ($server['id'] == $i) ? 'selected="selected"' : ''?>><?php echo isset($srv['name']) ? format_html($srv['name']) : $srv['host'].':'.$srv['port']?></option>
+<?php } ?>
+</select>
 
+<?php if($redis) { ?>
 
+<?php
+if (isset($server['databases'])) {
+  $databases = $server['databases'];
+} else {
+  $databases = $redis->config('GET', 'databases');
+  $databases = $databases['databases'];
+}
+if ($databases > 1) { ?>
+  <select id="database">
+  <?php for ($d = 0; $d < $databases; ++$d) { ?>
+  <option value="<?php echo $d?>" <?php echo ($server['db'] == $d) ? 'selected="selected"' : ''?>>database <?php echo $d?></option>
+  <?php } ?>
+  </select>
+<?php } ?>
+</p>
 
-// --------------------------------------------------------------------
-// END OF USER CONFIGURABLE SETTINGS.  DO NOT EDIT BELOW THIS LINE
-// --------------------------------------------------------------------
+<p>
+<?php if (isset($login)) { ?>
+<a href="logout.php"><img src="images/logout.png" width="16" height="16" title="Logout" alt="[L]"></a>
+<?php } ?>
+<a href="?info&amp;s=<?php echo $server['id']?>&amp;d=<?php echo $server['db']?>"><img src="images/info.png" width="16" height="16" title="Info" alt="[I]"></a>
+<a href="?export&amp;s=<?php echo $server['id']?>&amp;d=<?php echo $server['db']?>"><img src="images/export.png" width="16" height="16" title="Export" alt="[E]"></a>
+<a href="?import&amp;s=<?php echo $server['id']?>&amp;d=<?php echo $server['db']?>"><img src="images/import.png" width="16" height="16" title="Import" alt="[I]"></a>
+<?php if (isset($server['flush']) && $server['flush']) { ?>
+<a href="?flush&amp;s=<?php echo $server['id']?>&amp;d=<?php echo $server['db']?>" id="flush"><img src="images/flush.png" width="16" height="16" title="Flush" alt="[F]"></a>
+<?php } ?>
+</p>
 
-/*
- * ---------------------------------------------------------------
- *  Resolve the system path for increased reliability
- * ---------------------------------------------------------------
- */
+<p>
+<a href="?edit&amp;s=<?php echo $server['id']?>&amp;d=<?php echo $server['db']?>" class="add">Add another key</a>
+</p>
 
-	// Set the current directory correctly for CLI requests
-	if (defined('STDIN'))
-	{
-		chdir(dirname(__FILE__));
-	}
+<p>
+<input type="text" id="server_filter" size="14" value="<?php echo format_html($server['filter']); ?>" placeholder="type here to server filter" class="info">
+<button id="btn_server_filter">Filter!</button>
+</p>
 
-	if (($_temp = realpath($system_path)) !== FALSE)
-	{
-		$system_path = $_temp.'/';
-	}
-	else
-	{
-		// Ensure there's a trailing slash
-		$system_path = rtrim($system_path, '/').'/';
-	}
+<p>
+<input type="text" id="filter" size="24" value="type here to filter" placeholder="type here to filter" class="info">
+</p>
 
-	// Is the system path correct?
-	if ( ! is_dir($system_path))
-	{
-		header('HTTP/1.1 503 Service Unavailable.', TRUE, 503);
-		echo 'Your system folder path does not appear to be set correctly. Please open the following file and correct this: '.pathinfo(__FILE__, PATHINFO_BASENAME);
-		exit(3); // EXIT_CONFIG
-	}
+<div id="keys">
+<ul>
+<?php print_namespace($namespaces, 'Keys', '', empty($namespaces))?>
+</ul>
+</div><!-- #keys -->
 
-/*
- * -------------------------------------------------------------------
- *  Now that we know the path, set the main path constants
- * -------------------------------------------------------------------
- */
-	// The name of THIS file
-	define('SELF', pathinfo(__FILE__, PATHINFO_BASENAME));
+<?php } else { ?>
+</p>
+<div style="color:red">Can't connect to this server</div>
+<?php } ?>
 
-	// Path to the system folder
-	define('BASEPATH', str_replace('\\', '/', $system_path));
+</div><!-- #sidebar -->
 
-	// Path to the front controller (this file)
-	define('FCPATH', dirname(__FILE__).'/');
+<div id="resize"></div>
+<div id="resize-layover"></div>
 
-	// Name of the "system folder"
-	define('SYSDIR', trim(strrchr(trim(BASEPATH, '/'), '/'), '/'));
+<div id="frame">
+<iframe src="<?php echo format_html($iframe)?>" id="iframe" frameborder="0" scrolling="0"></iframe>
+</div><!-- #frame -->
 
-	// The path to the "application" folder
-	if (is_dir($application_folder))
-	{
-		if (($_temp = realpath($application_folder)) !== FALSE)
-		{
-			$application_folder = $_temp;
-		}
+<?php
 
-		define('APPPATH', $application_folder.DIRECTORY_SEPARATOR);
-	}
-	else
-	{
-		if ( ! is_dir(BASEPATH.$application_folder.DIRECTORY_SEPARATOR))
-		{
-			header('HTTP/1.1 503 Service Unavailable.', TRUE, 503);
-			echo 'Your application folder path does not appear to be set correctly. Please open the following file and correct this: '.SELF;
-			exit(3); // EXIT_CONFIG
-		}
+require 'includes/footer.inc.php';
 
-		define('APPPATH', BASEPATH.$application_folder.DIRECTORY_SEPARATOR);
-	}
-
-	// The path to the "views" folder
-	if ( ! is_dir($view_folder))
-	{
-		if ( ! empty($view_folder) && is_dir(APPPATH.$view_folder.DIRECTORY_SEPARATOR))
-		{
-			$view_folder = APPPATH.$view_folder;
-		}
-		elseif ( ! is_dir(APPPATH.'views'.DIRECTORY_SEPARATOR))
-		{
-			header('HTTP/1.1 503 Service Unavailable.', TRUE, 503);
-			echo 'Your view folder path does not appear to be set correctly. Please open the following file and correct this: '.SELF;
-			exit(3); // EXIT_CONFIG
-		}
-		else
-		{
-			$view_folder = APPPATH.'views';
-		}
-	}
-
-	if (($_temp = realpath($view_folder)) !== FALSE)
-	{
-		$view_folder = $_temp.DIRECTORY_SEPARATOR;
-	}
-	else
-	{
-		$view_folder = rtrim($view_folder, '/\\').DIRECTORY_SEPARATOR;
-	}
-
-	define('VIEWPATH', $view_folder);
-
-/*
- * --------------------------------------------------------------------
- * LOAD THE BOOTSTRAP FILE
- * --------------------------------------------------------------------
- *
- * And away we go...
- */
-require_once BASEPATH.'core/CodeIgniter.php';
+?>
